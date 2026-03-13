@@ -1,17 +1,26 @@
 @echo off
 setlocal
 
-echo 🛠️ Compilando frontend...
-cd client
-call npm run build
-cd ..
+cd /d %~dp0
 
-echo 🚀 Iniciando backend...
-start "Backend" cmd /k "cd server && node index.js"
+echo Verificando puertos...
+node scripts/check-ports.js
+if errorlevel 1 (
+  pause
+  exit /b 1
+)
+
+echo Iniciando API (Nest/Fastify)...
+start "API" cmd /k "npm --workspace server run dev"
 
 timeout /t 2 >nul
 
-echo 🌐 Abriendo navegador...
-start http://localhost:3001
+echo Iniciando WEB (Next.js)...
+start "WEB" cmd /k "npm --workspace client run dev"
+
+timeout /t 2 >nul
+
+echo Abriendo navegador...
+start http://localhost:3000
 
 endlocal
