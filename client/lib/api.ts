@@ -1,4 +1,4 @@
-import type { RunCreated, RunMode, TreeNode } from "./types";
+import type { BrowserItem, RunCreated, RunMode, TreeNode } from "./types";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001";
@@ -82,4 +82,12 @@ export async function stopRunItem(runId: string, itemId: string): Promise<void> 
 
 export function runStreamUrl(runId: string): string {
   return `${API_BASE_URL}/api/runs/${runId}/stream`;
+}
+
+export async function browseFs(path?: string): Promise<BrowserItem[]> {
+  const query = path ? `?path=${encodeURIComponent(path)}` : "";
+  const payload = await fetchJson<{ items: BrowserItem[] }>(
+    `${API_BASE_URL}/api/workspace/browse${query}`
+  );
+  return payload.items;
 }

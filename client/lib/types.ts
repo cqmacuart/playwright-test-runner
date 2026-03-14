@@ -49,3 +49,9 @@ export type RunEvent =
       exitCode: number | null;
     }
   | { type: "run_finished"; runId: string; stopped: boolean };
+
+export type BrowserItem = {
+  name: string;
+  type: "folder" | "drive";
+  path: string;
+};

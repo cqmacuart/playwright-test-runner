@@ -23,4 +23,10 @@ export class WorkspaceController {
     const nodes = this.workspaceService.listTree(relativePath ?? "");
     return { nodes };
   }
+
+  @Get("browse")
+  async browse(@Query("path") path?: string) {
+    const items = await this.workspaceService.browseFs(path);
+    return { items };
+  }
 }

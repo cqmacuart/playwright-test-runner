@@ -19,12 +19,17 @@ export class WorkspaceService {
 
     const command = [
       "Add-Type -AssemblyName System.Windows.Forms",
-      "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",
-      "$dialog.Description = 'Selecciona la carpeta raíz del repo Playwright'",
-      "$dialog.ShowNewFolderButton = $false",
+      "$dialog = New-Object System.Windows.Forms.OpenFileDialog",
+      "$dialog.Title = 'Buscar carpeta'",
+      "$dialog.Filter = 'Folders|*.none'",
+      "$dialog.CheckFileExists = $false",
+      "$dialog.CheckPathExists = $true",
+      "$dialog.ValidateNames = $false",
+      "$dialog.FileName = 'Seleccionar carpeta'",
       "if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {",
+      "  $folder = [System.IO.Path]::GetDirectoryName($dialog.FileName)",
       "  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
-      "  Write-Output $dialog.SelectedPath",
+      "  Write-Output $folder",
       "}",
     ].join("; ");
 
@@ -120,11 +125,65 @@ export class WorkspaceService {
     });
   }
 
+  async browseFs(targetPath?: string): Promise<{ name: string; type: "folder" | "drive"; path: string }[]> {
+    if (!targetPath) {
+      // List drives on Windows
+      if (process.platform === "win32") {
+        return new Promise((resolve) => {
+          execFile("wmic", ["logicaldisk", "get", "name"], (error, stdout) => {
+            if (error) {
+              resolve([{ name: "C:", type: "drive", path: "C:\\" }]);
+              return;
+            }
+            const drives = stdout
+              .split("\r\n")
+              .filter((line) => line.trim() && !line.includes("Name"))
+              .map((line) => {
+                const name = line.trim();
+                return { name, type: "drive" as const, path: name + "\\" };
+              });
+            resolve(drives);
+          });
+        });
+      }
+      return [{ name: "Root", type: "drive", path: "/" }];
+    }
+
+    const resolvedPath = path.resolve(targetPath);
+    if (!fs.existsSync(resolvedPath)) {
+      throw new BadRequestException("Ruta inexistente.");
+    }
+
+    const stats = fs.statSync(resolvedPath);
+    if (!stats.isDirectory()) {
+      throw new BadRequestException("No es un directorio.");
+    }
+
+    try {
+      const entries = fs.readdirSync(resolvedPath, { withFileTypes: true });
+      return entries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => ({
+          name: entry.name,
+          type: "folder" as const,
+          path: path.join(resolvedPath, entry.name),
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    } catch (err) {
+      throw new BadRequestException("Acceso denegado o error al leer carpeta.");
+    }
+  }
+
   private folderHasChildren(folderPath: string): boolean {
     const queue = [folderPath];
     while (queue.length > 0) {
       const current = queue.shift()!;
-      const entries = fs.readdirSync(current, { withFileTypes: true });
+      let entries: fs.Dirent[] = [];
+      try {
+        entries = fs.readdirSync(current, { withFileTypes: true });
+      } catch {
+        continue;
+      }
       for (const entry of entries) {
         if (entry.isDirectory()) {
           if (EXCLUDED_DIRS.has(entry.name)) {
