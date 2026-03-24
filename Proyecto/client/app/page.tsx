@@ -205,10 +205,10 @@ export default function HomePage() {
         if ("reportPath" in payload && payload.reportPath) {
           setReportNotice(payload.reportPath);
         }
-        setBatchRunId(null); // Limpiamos el ID de ejecución para liberar la UI
         eventSource.close();
         delete streams.current[runId];
-      }    };
+      }
+    };
 
     eventSource.onerror = () => {
       eventSource.close();

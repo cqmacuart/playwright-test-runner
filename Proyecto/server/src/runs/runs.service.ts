@@ -1,8 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { spawn } from "child_process";
-import { promisify } from "util";
-import { execFile as execFileCb } from "child_process";
-const execFile = promisify(execFileCb);
+import { execFile } from "child_process/promises";
 import { EventEmitter } from "events";
 import * as fs from "fs";
 import * as path from "path";
@@ -55,29 +53,25 @@ export class RunsService {
       mode,
       parallelism,
       items,
-      queue: [...items], // Siempre usamos la cola para procesos individuales
+      queue: reportStoragePath ? [] : [...items],
       active: new Map<string, RunItem>(),
       stopped: false,
       completed: false,
       emitter: new EventEmitter(),
       reportStoragePath,
     };
-
-    if (reportStoragePath) {
-      const blobDir = path.join(reportStoragePath, `.pw-blobs-${runId}`);
-      if (fs.existsSync(blobDir)) {
-        fs.rmSync(blobDir, { recursive: true, force: true });
-      }
-      fs.mkdirSync(blobDir, { recursive: true });
-      run.tmpReportDir = blobDir;
-    }
-
     this.runs.set(runId, run);
     setTimeout(() => {
       this.emit(run, { type: "run_started", runId });
-      void this.pump(runId).catch(() => {
-        void this.stopRun(runId).catch(() => undefined);
-      });
+      if (reportStoragePath) {
+        void this.startUnifiedRun(runId).catch(() => {
+          void this.stopRun(runId).catch(() => undefined);
+        });
+      } else {
+        void this.pump(runId).catch(() => {
+          void this.stopRun(runId).catch(() => undefined);
+        });
+      }
     }, 300);
 
     return { runId, mode, parallelism, items };
@@ -364,8 +358,7 @@ export class RunsService {
     );
     const command = fs.existsSync(localBin) ? localBin : isWindows ? "npx.cmd" : "npx";
     const workers = run.mode === "sequential" ? 1 : run.parallelism;
-    // 'list' es el mejor reportero para streaming: escribe una línea al iniciar y otra al terminar.
-    const reporterArgs = ["--reporter=list", "--reporter=html", `--workers=${workers}`];
+    const reporterArgs = ["--reporter=line", "--reporter=html", `--workers=${workers}`];
     const args = fs.existsSync(localBin)
       ? ["test", ...relativePaths, ...reporterArgs]
       : ["playwright", "test", ...relativePaths, ...reporterArgs];
@@ -373,7 +366,6 @@ export class RunsService {
     const env = {
       ...process.env,
       PLAYWRIGHT_HTML_OUTPUT_DIR: tmpDir,
-      PLAYWRIGHT_REPORTER: "list", // Forzamos el reportero list por variable de entorno
     };
 
     const child = spawn(command, args, {
@@ -499,57 +491,40 @@ export class RunsService {
       return;
     }
     const now = new Date().toISOString();
-
-    // Identificamos a qué archivo pertenece esta línea de log
-    const detectedIdx = this.matchLineToBestFileIndex(line, run.items);
-
-    // Lógica de "Fast-Forward": Si detectamos actividad en un archivo que está más adelante en la cola,
-    // significa que el proceso secuencial ya avanzó y debemos cerrar los anteriores.
-    if (detectedIdx !== null && detectedIdx > state.activeIndex) {
-      for (let i = state.activeIndex; i < detectedIdx; i++) {
-        if (!progress.finished.has(i)) {
-          this.emitFileFinishedForItem(run, i, null, progress);
-        }
-      }
-      state.activeIndex = detectedIdx;
-    }
-
-    // Aseguramos que el archivo actual esté marcado como 'running'
-    if (state.activeIndex < run.items.length) {
-      const currentIdx = state.activeIndex;
-      if (run.items[currentIdx].status === "queued" && 
-          (detectedIdx === currentIdx || this.lineReferencesTestFile(line, run.items[currentIdx].testFile))) {
-        this.ensureQueuedMarkedStarted(run, currentIdx, now);
+    for (let i = 0; i < run.items.length; i++) {
+      if (this.lineReferencesTestFile(line, run.items[i].testFile) && run.items[i].status === "queued") {
+        this.ensureQueuedMarkedStarted(run, i, now);
       }
     }
 
     if (this.isPlaywrightTestResultLine(line)) {
-      const idx = detectedIdx;
-      if (idx !== null && idx === state.activeIndex && !progress.finished.has(idx)) {
+      const idx = this.matchLineToBestFileIndex(line, run.items);
+      if (
+        idx !== null &&
+        idx === state.activeIndex &&
+        !progress.finished.has(idx) &&
+        state.activeIndex < run.items.length
+      ) {
         if (this.resultLineIndicatesFail(line)) {
           progress.anyFailed[idx] = true;
         }
         progress.completed[idx]++;
-        
         if (progress.completed[idx] >= progress.expected[idx]) {
           this.emitFileFinishedForItem(run, idx, null, progress);
           state.activeIndex++;
-          // Al avanzar, si el siguiente ya estaba marcado (por algún log), saltamos al siguiente disponible
           while (state.activeIndex < run.items.length && progress.finished.has(state.activeIndex)) {
             state.activeIndex++;
           }
           if (state.activeIndex < run.items.length) {
             const next = run.items[state.activeIndex];
-            if (next.status === "queued") {
-              next.status = "running";
-              next.startedAt = new Date().toISOString();
-              this.emit(run, {
-                type: "item_started",
-                runId: run.runId,
-                itemId: next.itemId,
-                testFile: next.testFile,
-              });
-            }
+            next.status = "running";
+            next.startedAt = new Date().toISOString();
+            this.emit(run, {
+              type: "item_started",
+              runId: run.runId,
+              itemId: next.itemId,
+              testFile: next.testFile,
+            });
           }
         }
       }
@@ -575,53 +550,36 @@ export class RunsService {
   private emitUnifiedParallelLine(
     run: Run,
     state: NonNullable<Run["unifiedParallel"]>,
-    rawLine: string,
+    line: string,
     type: "stdout" | "stderr"
   ): void {
-    // 1. Limpieza ANSI
-    const line = rawLine.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").trim();
-    if (!line) return;
-
     const progress = run.unifiedProgress;
-    if (!progress) return;
-
     const pool = state.runningPool;
-    const nowIso = new Date().toISOString();
-    const detectedIdx = this.matchLineToBestFileIndex(line, run.items);
+    const now = new Date().toISOString();
 
-    // 2. Detección Dual de Inicio (List: ◦ | Line: [n/m])
-    const isListStart = line.startsWith("◦") || line.startsWith("...");
-    const isLineStart = /^\[\d+\/\d+\]/.test(line);
-    const isStart = (isListStart || isLineStart) && detectedIdx !== null;
-
-    if (isStart && run.items[detectedIdx].status === "queued") {
-      // Si el pool está lleno, cerramos al que no sea el actual
-      if (pool.size >= run.parallelism) {
-        const toEvict = Array.from(pool).find(idx => idx !== detectedIdx);
-        if (toEvict !== undefined) {
-          this.emitFileFinishedForItem(run, toEvict, null, progress);
-          pool.delete(toEvict);
+    if (progress) {
+      for (let i = 0; i < run.items.length; i++) {
+        if (this.lineReferencesTestFile(line, run.items[i].testFile) && run.items[i].status === "queued") {
+          this.ensureQueuedMarkedStarted(run, i, now, state);
         }
       }
-      this.ensureQueuedMarkedStarted(run, detectedIdx, nowIso, state);
+
+      if (this.isPlaywrightTestResultLine(line)) {
+        const idx = this.matchLineToBestFileIndex(line, run.items);
+        if (idx !== null && !progress.finished.has(idx)) {
+          if (this.resultLineIndicatesFail(line)) {
+            progress.anyFailed[idx] = true;
+          }
+          progress.completed[idx]++;
+          if (progress.completed[idx] >= progress.expected[idx]) {
+            this.emitFileFinishedForItem(run, idx, null, progress);
+          }
+        }
+      }
     }
 
-    // 3. Detección de Finalización (✓/✘ + Duración o Resumen final)
-    const hasDuration = /\(\d+\.?\d*[ms]\)\s*$/.test(line);
-    const hasSymbol = /[✓✔✘☓✖]/.test(line);
-    const isFinishSignal = (hasSymbol && hasDuration) || 
-                           line.includes("Slow test file:") ||
-                           /\d+\s+passed\s+\(/.test(line);
-
-    if (isFinishSignal && detectedIdx !== null && pool.has(detectedIdx)) {
-      this.emitFileFinishedForItem(run, detectedIdx, null, progress);
-      pool.delete(detectedIdx);
-    }
-
-    // 4. Enrutamiento de Logs
-    const routeIdx = detectedIdx;
+    const routeIdx = this.matchLineToBestFileIndex(line, run.items);
     const chunk = `${line}\n`;
-    
     if (routeIdx !== null && (pool.has(routeIdx) || run.items[routeIdx].status === "running")) {
       const it = run.items[routeIdx];
       this.emit(run, {
@@ -635,7 +593,9 @@ export class RunsService {
     }
 
     for (const idx of pool) {
-      if (progress.finished.has(idx)) continue;
+      if (progress?.finished.has(idx)) {
+        continue;
+      }
       const it = run.items[idx];
       this.emit(run, {
         type,
@@ -797,126 +757,9 @@ export class RunsService {
       this.startItem(run, item);
     }
 
-    if ((run.stopped || run.queue.length === 0) && run.active.size === 0 && !run.completed && !run.merging) {
-      if (run.reportStoragePath && run.tmpReportDir && fs.existsSync(run.tmpReportDir)) {
-        run.merging = true;
-        await this.finalizeReportWithMerge(run);
-      } else {
-        run.completed = true;
-        this.emit(run, { type: "run_finished", runId: run.runId, stopped: run.stopped });
-        setTimeout(() => this.runs.delete(run.runId), 5 * 60 * 1000);
-      }
-    }
-  }
-
-  private async finalizeReportWithMerge(run: Run): Promise<void> {
-    const finishedAt = new Date();
-    const workspaceRoot = this.workspaceService.getWorkspaceRoot();
-    const folderName = this.formatReportFolderName(finishedAt);
-    let finalDir = path.join(run.reportStoragePath!, folderName);
-    if (fs.existsSync(finalDir)) {
-      finalDir = path.join(run.reportStoragePath!, `${folderName}_${randomUUID().slice(0, 8)}`);
-    }
-
-    const isWindows = process.platform === "win32";
-    const localBin = path.join(
-      workspaceRoot,
-      "node_modules",
-      ".bin",
-      isWindows ? "playwright.cmd" : "playwright"
-    );
-    const command = fs.existsSync(localBin) ? localBin : isWindows ? "npx.cmd" : "npx";
-    
-    // NOTA: 'merge-reports' no usa --output en todas las versiones. 
-    // Usamos PLAYWRIGHT_HTML_REPORT para fijar el destino del reportero html.
-    const args = fs.existsSync(localBin)
-      ? ["merge-reports", run.tmpReportDir!, "--reporter=html"]
-      : ["playwright", "merge-reports", run.tmpReportDir!, "--reporter=html"];
-
-    const mergeEnv = { 
-      ...process.env, 
-      PLAYWRIGHT_HTML_REPORT: finalDir 
-    };
-
-    try {
-      console.log(`[Suite ${run.runId}] Consolidando informe HTML en: ${finalDir}...`);
-      // Margen de seguridad para que Windows libere archivos de los procesos de test
-      await new Promise(r => setTimeout(r, 2500));
-
-      // --- PASO DE RECOLECCIÓN: Movemos los blobs de subcarpetas a la raíz ---
-      const blobFiles: string[] = [];
-      if (fs.existsSync(run.tmpReportDir!)) {
-        const subdirs = fs.readdirSync(run.tmpReportDir!, { withFileTypes: true });
-        for (const dir of subdirs) {
-          if (dir.isDirectory()) {
-            const itemPath = path.join(run.tmpReportDir!, dir.name);
-            const files = fs.readdirSync(itemPath);
-            for (const file of files) {
-              if (file.endsWith(".zip")) {
-                const src = path.join(itemPath, file);
-                const dest = path.join(run.tmpReportDir!, `final-${dir.name}-${file}`);
-                try {
-                  fs.copyFileSync(src, dest);
-                  blobFiles.push(dest);
-                } catch (e) {
-                  console.warn(`[Suite ${run.runId}] No se pudo copiar blob ${file}: ${e.message}`);
-                }
-              }
-            }
-          }
-        }
-      }
-
-      console.log(`[Suite ${run.runId}] Recolectados ${blobFiles.length} archivos blob.`);
-
-      // Ejecutamos el merge y capturamos el proceso para poder matarlo si es necesario
-      const mergeProcess = execFile(command, args, {
-        cwd: workspaceRoot,
-        env: mergeEnv,
-        windowsHide: true,
-        shell: isWindows,
-        maxBuffer: 64 * 1024 * 1024,
-      });
-
-      const { stdout, stderr } = await mergeProcess;
-
-      if (stdout) console.log(`[Merge stdout]: ${stdout}`);
-      if (stderr) console.error(`[Merge stderr]: ${stderr}`);
-
-      // --- LIMPIEZA POST-MERGE ---
-      // Esperamos a que el sistema libere los archivos
-      await new Promise(r => setTimeout(r, 2000));
-
-      if (fs.existsSync(run.tmpReportDir!)) {
-        try {
-          fs.rmSync(run.tmpReportDir!, { recursive: true, force: true });
-        } catch { 
-          console.warn(`[Suite ${run.runId}] Carpeta temporal bloqueada por Windows. Se ignorará.`);
-        }
-      }
-
-      // Limpieza de test-results
-      for (const item of run.items) {
-        const itemOutputDir = path.join(workspaceRoot, "test-results", item.itemId);
-        if (fs.existsSync(itemOutputDir)) {
-          try {
-            fs.rmSync(itemOutputDir, { recursive: true, force: true });
-          } catch { /* ignore */ }
-        }
-      }
-
+    if ((run.stopped || run.queue.length === 0) && run.active.size === 0 && !run.completed) {
       run.completed = true;
-      run.merging = false;
-      console.log(`[Suite ${run.runId}] Informe consolidado con éxito en: ${finalDir}`);
-      this.emit(run, { type: "run_finished", runId: run.runId, stopped: run.stopped, reportPath: finalDir });
-    } catch (e) {
-
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error(`[Suite ${run.runId}] Error crítico al consolidar el informe:`, msg);
-      run.completed = true;
-      run.merging = false;
       this.emit(run, { type: "run_finished", runId: run.runId, stopped: run.stopped });
-    } finally {
       setTimeout(() => this.runs.delete(run.runId), 5 * 60 * 1000);
     }
   }
@@ -937,14 +780,6 @@ export class RunsService {
       ? ["test", relativePath]
       : ["playwright", "test", relativePath];
 
-    // Aislamos los resultados de cada item para evitar colisiones de archivos temporales (.playwright-artifacts-0)
-    const itemOutputDir = path.join(workspaceRoot, "test-results", item.itemId);
-    args.push(`--output=${itemOutputDir}`);
-
-    if (run.reportStoragePath && run.tmpReportDir) {
-      args.push("--reporter=blob");
-    }
-
     item.status = "running";
     item.startedAt = new Date().toISOString();
     run.active.set(item.itemId, item);
@@ -956,19 +791,8 @@ export class RunsService {
       testFile: item.testFile,
     });
 
-    const env = { ...process.env };
-    if (run.reportStoragePath && run.tmpReportDir) {
-      // Creamos una subcarpeta ÚNICA por cada item para que no haya bloqueos de archivos en Windows
-      const itemBlobDir = path.join(run.tmpReportDir, item.itemId);
-      if (!fs.existsSync(itemBlobDir)) {
-        fs.mkdirSync(itemBlobDir, { recursive: true });
-      }
-      env.PLAYWRIGHT_BLOB_OUTPUT_DIR = itemBlobDir;
-    }
-
     const child = spawn(command, args, {
       cwd: workspaceRoot,
-      env,
       windowsHide: true,
       detached: process.platform !== "win32",
       shell: isWindows,
@@ -1019,10 +843,6 @@ export class RunsService {
     });
 
     child.on("close", (code) => {
-      // Intentamos matar al árbol de procesos para liberar navegadores que hayan quedado vivos
-      if (child.pid) {
-        killProcessTree(child.pid).catch(() => undefined);
-      }
       run.active.delete(item.itemId);
       item.exitCode = code;
       item.finishedAt = new Date().toISOString();

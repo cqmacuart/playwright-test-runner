@@ -1,0 +1,24 @@
+{
+  "name": "playwright-test-runner-monorepo",
+  "private": true,
+  "version": "1.0.0",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "preflight": "node scripts/preflight.js",
+    "check:ports": "node scripts/check-ports.js",
+    "setup": "npm run preflight && npm install",
+    "dev": "npm run preflight && npm run check:ports && concurrently \"npm --workspace server run dev\" \"npm --workspace client run dev\"",
+    "build": "npm run preflight && npm --workspace server run build && npm --workspace client run build",
+    "start": "npm run preflight && npm --workspace server run start",
+    "lint": "npm --workspace server run lint && npm --workspace client run lint"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

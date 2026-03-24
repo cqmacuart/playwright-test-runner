@@ -23,7 +23,6 @@ export type Run = {
   active: Map<string, RunItem>;
   stopped: boolean;
   completed: boolean;
-  merging?: boolean;
   emitter: EventEmitter;
   /** Si está definido, la ejecución es un único proceso Playwright con informe HTML unificado. */
   reportStoragePath?: string;
