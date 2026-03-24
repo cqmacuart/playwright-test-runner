@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Playwright Runner UI",
-  description: "Local runner for Playwright test repositories.",
+  title: "Playwright Runner UI | Modern Test Orchestration",
+  description: "High-performance local runner for Playwright test suites.",
 };
 
 export default function RootLayout({

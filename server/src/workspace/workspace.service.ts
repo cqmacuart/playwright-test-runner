@@ -169,7 +169,7 @@ export class WorkspaceService {
           path: path.join(resolvedPath, entry.name),
         }))
         .sort((a, b) => a.name.localeCompare(b.name));
-    } catch (err) {
+    } catch {
       throw new BadRequestException("Acceso denegado o error al leer carpeta.");
     }
   }

@@ -55,12 +55,12 @@ export class RunsService {
       emitter: new EventEmitter(),
     };
     this.runs.set(runId, run);
-    setImmediate(() => {
+    setTimeout(() => {
       this.emit(run, { type: "run_started", runId });
       this.pump(runId).catch(() => {
         this.stopRun(runId).catch(() => undefined);
       });
-    });
+    }, 300);
 
     return { runId, mode, parallelism, items };
   }
@@ -181,8 +181,32 @@ export class RunsService {
       cwd: workspaceRoot,
       windowsHide: true,
       detached: process.platform !== "win32",
+      shell: isWindows,
     });
     item.process = child;
+
+    child.on("error", (error: Error) => {
+      this.emit(run, {
+        type: "stderr",
+        runId: run.runId,
+        itemId: item.itemId,
+        testFile: item.testFile,
+        chunk: `Error de ejecución interno: ${error.message}\nVerifica que Playwright esté instalado y accesible.`,
+      });
+      run.active.delete(item.itemId);
+      item.exitCode = 1;
+      item.finishedAt = new Date().toISOString();
+      item.status = "failed";
+      this.emit(run, {
+        type: "item_finished",
+        runId: run.runId,
+        itemId: item.itemId,
+        testFile: item.testFile,
+        status: item.status,
+        exitCode: 1,
+      });
+      void this.pump(run.runId);
+    });
 
     child.stdout.on("data", (chunk: Buffer) => {
       this.emit(run, {

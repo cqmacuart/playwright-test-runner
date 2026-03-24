@@ -1,7 +1,7 @@
 import type { BrowserItem, RunCreated, RunMode, TreeNode } from "./types";
 
 const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001";
+  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:3001";
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
@@ -82,6 +82,25 @@ export async function stopRunItem(runId: string, itemId: string): Promise<void> 
 
 export function runStreamUrl(runId: string): string {
   return `${API_BASE_URL}/api/runs/${runId}/stream`;
+}
+
+export type RunItemSummary = {
+  itemId: string;
+  testFile: string;
+  status: string;
+  exitCode: number | null;
+};
+
+export async function getRun(runId: string): Promise<{ runId: string; items: RunItemSummary[] }> {
+  return fetchJson(`${API_BASE_URL}/api/runs/${runId}`);
+}
+
+export async function renameTestFile(from: string, to: string): Promise<void> {
+  await fetchJson(`${API_BASE_URL}/api/tests/rename`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ from, to }),
+  });
 }
 
 export async function browseFs(path?: string): Promise<BrowserItem[]> {
