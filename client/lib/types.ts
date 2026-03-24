@@ -48,6 +48,7 @@ export type RunEvent =
       status: RunItemStatus;
       exitCode: number | null;
     }
+  | { type: "report_merging"; runId: string }
   | { type: "run_finished"; runId: string; stopped: boolean; reportPath?: string };
 
 export type BrowserItem = {
