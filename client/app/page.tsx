@@ -101,6 +101,8 @@ export default function HomePage() {
   const [error, setError] = useState<string | null>(null);
   const [fileState, setFileState] = useState<Record<string, FileState>>({});
   const [batchRunId, setBatchRunId] = useState<string | null>(null);
+  const [isStarting, setIsStarting] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
 
   // Browser Modal State
   const [showBrowser, setShowBrowser] = useState(false);
@@ -201,11 +203,16 @@ export default function HomePage() {
       if (payload.type === "item_finished") {
         upsertFileState(payload.testFile, { status: payload.status });
       }
+      if (payload.type === "report_merging") {
+        setIsGenerating(true);
+      }
       if (payload.type === "run_finished") {
         if ("reportPath" in payload && payload.reportPath) {
           setReportNotice(payload.reportPath);
         }
-        setBatchRunId(null); // Limpiamos el ID de ejecución para liberar la UI
+        setBatchRunId(null); 
+        setIsGenerating(false);
+        setSelectedFiles(new Set()); // Deschequeamos todos los elementos
         eventSource.close();
         delete streams.current[runId];
       }    };
@@ -292,10 +299,15 @@ export default function HomePage() {
   async function runSingle(node: UiNode) {
     if (node.type !== "file") return;
     try {
+      setIsStarting(true);
       upsertFileState(node.relativePath, { status: "queued", log: "", logOpen: false });
+      await new Promise(r => setTimeout(r, 1000));
+      setIsStarting(false);
       const run = await runTests([node.relativePath], "sequential", 1, reportDir || undefined);
       connectRunStream(run.runId);
     } catch (err) {
+      setIsStarting(false);
+      setIsGenerating(false);
       upsertFileState(node.relativePath, { status: "failed", log: "Error starting run\n" });
     }
   }
@@ -304,13 +316,19 @@ export default function HomePage() {
     const files = Array.from(selectedFiles);
     if (!files.length) return;
     try {
-      const run = await runTests(files, mode, parallelism, reportDir || undefined);
-      setBatchRunId(run.runId);
+      setIsStarting(true);
       for (const file of files) {
         upsertFileState(file, { status: "queued", log: "", logOpen: false });
       }
+      await new Promise(r => setTimeout(r, 1000));
+      setIsStarting(false);
+      
+      const run = await runTests(files, mode, parallelism, reportDir || undefined);
+      setBatchRunId(run.runId);
       connectRunStream(run.runId);
     } catch (err) {
+      setIsStarting(false);
+      setIsGenerating(false);
       setError("Error starting batch run.");
     }
   }
@@ -420,6 +438,14 @@ export default function HomePage() {
       const invalidReason = getInvalidNameReason(node.name);
       const isInvalid = !!invalidReason;
       const currentStatus = state?.status ?? "idle";
+      
+      const isBusy = isStarting || isGenerating;
+      const isSuiteActive = !!batchRunId;
+      // Solo permitimos stop y log si está en ejecución. 
+      // Si hay una suite activa, bloqueamos todo lo que no sea parte de la suite o que no esté corriendo.
+      const canPlay = !isBusy && !isSuiteActive && currentStatus !== "running";
+      const canStop = !isBusy && currentStatus === "running";
+      const canCheck = !isBusy && !isSuiteActive;
 
       return (
         <div
@@ -430,6 +456,7 @@ export default function HomePage() {
             marginBottom: 4,
             borderLeft: isInvalid ? '3px solid var(--danger)' : '3px solid transparent',
             background: isInvalid ? 'rgba(248, 113, 113, 0.05)' : 'transparent',
+            opacity: (isBusy || (isSuiteActive && currentStatus !== "running" && currentStatus !== "queued")) ? 0.7 : 1
           }}
         >
           <div style={{ display: "grid", gridTemplateColumns: "24px 1fr auto auto", gap: 12, padding: "10px 12px", alignItems: 'center' }}>
@@ -445,7 +472,7 @@ export default function HomePage() {
                   });
                 }}
                 type="checkbox"
-                disabled={isInvalid}
+                disabled={isInvalid || !canCheck}
                 style={{ margin: 0, width: 14, height: 14 }}
               />
             </div>
@@ -483,6 +510,7 @@ export default function HomePage() {
                 <button
                   className="btn-rename"
                   onClick={(e) => { e.stopPropagation(); void handleAutoRename(node); }}
+                  disabled={isBusy || isSuiteActive}
                   data-tooltip={t.tooltipRename}
                   style={{ height: 30 }}
                 >
@@ -493,7 +521,7 @@ export default function HomePage() {
                 className="btn-ghost"
                 style={{ width: 30, height: 30, padding: 0, color: 'var(--success)', borderColor: 'rgba(74, 222, 128, 0.2)' }}
                 onClick={(e) => { e.stopPropagation(); void runSingle(node); }}
-                disabled={isInvalid || currentStatus === "running"}
+                disabled={isInvalid || !canPlay}
                 data-tooltip={t.tooltipPlay}
               >
                 ▶
@@ -502,7 +530,7 @@ export default function HomePage() {
                 className="btn-ghost"
                 style={{ width: 30, height: 30, padding: 0, color: 'var(--danger)', borderColor: 'rgba(248, 113, 113, 0.2)' }}
                 onClick={(e) => { e.stopPropagation(); void stopSingle(node.relativePath); }}
-                disabled={currentStatus !== "running"}
+                disabled={!canStop}
                 data-tooltip={t.tooltipStop}
               >
                 ■
@@ -642,15 +670,15 @@ export default function HomePage() {
              className="btn-primary" 
              style={{ width: '100%', padding: '12px', fontSize: 14 }}
              onClick={() => void runBatch()}
-             disabled={selectedFiles.size === 0}
+             disabled={selectedFiles.size === 0 || isStarting || !!batchRunId || isGenerating}
            >
-             {t.executeBatch} ({selectedFiles.size})
+             {isStarting ? t.cleaning : `${t.executeBatch} (${selectedFiles.size})`}
            </button>
            <button 
              className="btn-ghost" 
              style={{ width: '100%', marginTop: 8, color: 'var(--danger)', borderColor: 'rgba(248, 113, 113, 0.2)' }}
              onClick={() => void stopBatch()}
-             disabled={!batchRunId}
+             disabled={!batchRunId || isGenerating}
            >
              {t.stopAll}
            </button>
@@ -658,6 +686,27 @@ export default function HomePage() {
       </aside>
 
       <main className="content">
+        {/* Overlays de Carga */}
+        {isStarting && (
+          <div className="modal-overlay" style={{ zIndex: 9999, background: 'rgba(15, 23, 42, 0.8)', backdropFilter: 'blur(4px)' }}>
+            <div style={{ textAlign: 'center', color: 'white' }}>
+              <div className="spinner" style={{ marginBottom: 20 }}></div>
+              <h2 style={{ color: 'white' }}>{t.suiteStarting}</h2>
+              <p style={{ opacity: 0.7 }}>{t.cleaning}</p>
+            </div>
+          </div>
+        )}
+
+        {isGenerating && (
+          <div className="modal-overlay" style={{ zIndex: 9999, background: 'rgba(15, 23, 42, 0.8)', backdropFilter: 'blur(4px)' }}>
+            <div style={{ textAlign: 'center', color: 'white' }}>
+              <div className="spinner" style={{ marginBottom: 20 }}></div>
+              <h2 style={{ color: 'white' }}>{t.generatingReport}</h2>
+              <p style={{ opacity: 0.7 }}>{t.loading}</p>
+            </div>
+          </div>
+        )}
+
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <h2 style={{ margin: 0 }}>{t.treeTitle}</h2>
           <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 12px' }} onClick={() => setSelectedFiles(new Set())}>

@@ -49,5 +49,8 @@
   "reportsPick": "Choose folder",
   "reportsClear": "Clear folder",
   "reportsHint": "If you choose a folder, each completed suite will produce a single HTML report with all executed tests. The folder name will be Test_Suite_ plus the finish date and time.",
-  "reportSaved": "Report saved at:"
+  "reportSaved": "Report saved at:",
+  "suiteStarting": "Starting suite...",
+  "generatingReport": "Generating final report...",
+  "cleaning": "Cleaning states..."
   }

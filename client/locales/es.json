@@ -49,5 +49,8 @@
   "reportsPick": "Elegir carpeta",
   "reportsClear": "Quitar carpeta",
   "reportsHint": "Si eliges una carpeta, al terminar cada suite se guardará un único informe HTML con todos los tests. El nombre será Test_Suite_ seguido de la fecha y hora de finalización.",
-  "reportSaved": "Informe guardado en:"
+  "reportSaved": "Reporte guardado en:",
+  "suiteStarting": "Iniciando suite...",
+  "generatingReport": "Generando informe final...",
+  "cleaning": "Limpiando estados..."
   }

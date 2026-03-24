@@ -800,6 +800,7 @@ export class RunsService {
     if ((run.stopped || run.queue.length === 0) && run.active.size === 0 && !run.completed && !run.merging) {
       if (run.reportStoragePath && run.tmpReportDir && fs.existsSync(run.tmpReportDir)) {
         run.merging = true;
+        this.emit(run, { type: "report_merging", runId: run.runId });
         await this.finalizeReportWithMerge(run);
       } else {
         run.completed = true;
@@ -839,12 +840,10 @@ export class RunsService {
     };
 
     try {
-      console.log(`[Suite ${run.runId}] Consolidando informe HTML en: ${finalDir}...`);
       // Margen de seguridad para que Windows libere archivos de los procesos de test
       await new Promise(r => setTimeout(r, 2500));
 
       // --- PASO DE RECOLECCIÓN: Movemos los blobs de subcarpetas a la raíz ---
-      const blobFiles: string[] = [];
       if (fs.existsSync(run.tmpReportDir!)) {
         const subdirs = fs.readdirSync(run.tmpReportDir!, { withFileTypes: true });
         for (const dir of subdirs) {
@@ -857,17 +856,14 @@ export class RunsService {
                 const dest = path.join(run.tmpReportDir!, `final-${dir.name}-${file}`);
                 try {
                   fs.copyFileSync(src, dest);
-                  blobFiles.push(dest);
-                } catch (e) {
-                  console.warn(`[Suite ${run.runId}] No se pudo copiar blob ${file}: ${e.message}`);
+                } catch {
+                  // Silently ignore copy errors for individual blobs
                 }
               }
             }
           }
         }
       }
-
-      console.log(`[Suite ${run.runId}] Recolectados ${blobFiles.length} archivos blob.`);
 
       // Ejecutamos el merge y capturamos el proceso para poder matarlo si es necesario
       const mergeProcess = execFile(command, args, {
@@ -878,10 +874,7 @@ export class RunsService {
         maxBuffer: 64 * 1024 * 1024,
       });
 
-      const { stdout, stderr } = await mergeProcess;
-
-      if (stdout) console.log(`[Merge stdout]: ${stdout}`);
-      if (stderr) console.error(`[Merge stderr]: ${stderr}`);
+      await mergeProcess;
 
       // --- LIMPIEZA POST-MERGE ---
       // Esperamos a que el sistema libere los archivos
@@ -891,7 +884,7 @@ export class RunsService {
         try {
           fs.rmSync(run.tmpReportDir!, { recursive: true, force: true });
         } catch { 
-          console.warn(`[Suite ${run.runId}] Carpeta temporal bloqueada por Windows. Se ignorará.`);
+          // ignore
         }
       }
 
@@ -907,7 +900,6 @@ export class RunsService {
 
       run.completed = true;
       run.merging = false;
-      console.log(`[Suite ${run.runId}] Informe consolidado con éxito en: ${finalDir}`);
       this.emit(run, { type: "run_finished", runId: run.runId, stopped: run.stopped, reportPath: finalDir });
     } catch (e) {
 
